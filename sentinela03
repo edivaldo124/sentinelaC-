@@ -1,0 +1,123 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+
+
+const char* WIFI_SSID     = "projetosentinela1";
+const char* WIFI_PASS     = "projeto123";
+const char* SERVER_URL    = "http://192.168.0.200:5000/alerta";
+
+#define PIR_PIN    5   // Sensor PIR (movimento)
+#define GAS_PIN    A0  // Sensor MQ
+#define BTN_PIN    13  // Botão de ajuda
+#define LED_PIN    LED_BUILTIN // LED indicador
+
+// Tempos e limites
+const unsigned long SEM_MOV_LIMITE = 6 * 60 * 60 * 1000; // 6h em ms
+const unsigned long VERIFICA_MS     = 5000;              
+const int LIMITE_GAS                = 26;                 // % de gás perigoso
+
+unsigned long lastMotion = 0;
+unsigned long lastSend   = 0;
+bool alertaSemMovEnviado = false;
+int prevBtn = 0;
+unsigned long lastGasSend = 0;
+unsigned long lastLed = 0;
+
+void conectarWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    delay(250);
+  }
+  digitalWrite(LED_PIN, WiFi.status() == WL_CONNECTED ? HIGH : LOW);
+}
+
+void piscarLED(int vezes, int delayMs) {
+  bool estado = digitalRead(LED_PIN);
+  for (int i = 0; i < vezes; i++) {
+    digitalWrite(LED_PIN, !estado);
+    delay(delayMs);
+    digitalWrite(LED_PIN, estado);
+    delay(delayMs);
+  }
+}
+
+void enviarAlerta(int id, String tipo) {
+  if (millis() - lastSend < 5000) return; 
+
+  lastSend = millis();
+
+  Serial.print("ALERTA ENVIADO -> ID: ");
+  Serial.print(id);
+  Serial.print(" | TIPO: ");
+  Serial.println(tipo);
+
+  conectarWiFi();
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  WiFiClient client;
+  HTTPClient http;
+  String url = String(SERVER_URL) + "?id=" + String(id) + "&tipo=" + tipo;
+  
+  if (http.begin(client, url)) {
+    piscarLED(3, 200);
+    http.GET();
+    http.end();
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(PIR_PIN, INPUT_PULLUP);
+  pinMode(GAS_PIN, INPUT);
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  
+  digitalWrite(LED_PIN, HIGH);
+  conectarWiFi();
+  lastMotion = millis();
+}
+
+
+void loop() {
+  int pir = digitalRead(PIR_PIN);
+
+  if (pir == LOW) {
+    Serial.println("Presenca detectada");
+    lastMotion = millis();
+    alertaSemMovEnviado = false;
+} else {
+    Serial.println("Sem presenca");
+}
+
+  int gasRaw = analogRead(GAS_PIN);
+  int gasPerc = map(gasRaw, 0, 1023, 0, 100);
+  Serial.print("Gas: ");
+  Serial.print(gasPerc);
+  Serial.println("%");
+
+  int btn = (digitalRead(BTN_PIN) == LOW) ? 1 : 0;
+
+  unsigned long tempoSemMov = millis() - lastMotion;
+  if (tempoSemMov >= SEM_MOV_LIMITE && !alertaSemMovEnviado) {
+    enviarAlerta(1, "sem_movimento");
+    alertaSemMovEnviado = true;
+  }
+  if (gasPerc > LIMITE_GAS && millis() - lastGasSend >= 300000) {
+  enviarAlerta(1, "gas_alto");
+  lastGasSend = millis();
+}
+  if (btn && !prevBtn) enviarAlerta(1, "botao_ajuda");
+
+  if (millis() - lastLed >= VERIFICA_MS) {
+    piscarLED(1, 500);
+    lastLed = millis();
+}
+
+  prevBtn = btn;
+  delay(100);
+}
